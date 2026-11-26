@@ -11,15 +11,11 @@ from fastapi.templating import Jinja2Templates
 from instagrapi import Client
 from instagrapi.exceptions import LoginRequired, ChallengeRequired, RateLimitError
 
-# Database imports
 from database import get_config, set_config, update_user_welcome, get_user_last_welcome, sqlite3, DB_NAME
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
-# ==========================================
-# BOT ENGINE CLASS
-# ==========================================
 class InstagramBot(threading.Thread):
     def __init__(self):
         super().__init__()
@@ -30,7 +26,6 @@ class InstagramBot(threading.Thread):
         self.admins = []
         self.session_id = ""
         
-        # Bad word system state
         self.bad_target = None
         self.bad_word = None
         self.stop_spam = False
@@ -40,13 +35,12 @@ class InstagramBot(threading.Thread):
         print("[!] Bot Stop Requested...")
 
     def safe_send(self, text, thread_id, reply_to_id=None):
-        """Send message, optionally as a swipe reply, with fast response"""
         try:
             if reply_to_id:
                 self.cl.direct_send(text, thread_ids=[thread_id], replied_to_message_id=reply_to_id)
             else:
                 self.cl.direct_send(text, thread_ids=[thread_id])
-            time.sleep(0.5) # Fast response
+            time.sleep(0.5)
         except Exception as e:
             print(f"[-] Message Send Failed: {e}")
 
@@ -54,17 +48,14 @@ class InstagramBot(threading.Thread):
         self.running = True
         self.group_id = get_config("group_id")
         self.admins = get_config("admins", [])
-        
-        # Load credentials from DB
         self.session_id = get_config("session_id")
         
         print("[*] Initializing Instagram Client...")
         self.cl = Client()
         
-        # Login Logic with Error Handling
         try:
             self.cl.login_by_sessionid(self.session_id)
-            print("[+] Login Successful!")
+            print(f"[+] Login Successful! Bot Username: {self.cl.username}")
             set_config("is_running", True)
         except Exception as e:
             print(f"[-] Login Failed (Invalid Session): {e}")
@@ -80,15 +71,12 @@ class InstagramBot(threading.Thread):
                     self.running = False
                     break
 
-                # Fetch latest messages
                 messages = self.cl.direct_messages(self.group_id, amount=15)
                 
-                # Process oldest to newest to maintain conversation flow
                 for msg in reversed(messages):
                     if msg.user_id == self.cl.user_id:
                         continue 
 
-                    # Fetch username safely
                     try:
                         username = self.cl.user_info(msg.user_id).username
                     except Exception:
@@ -97,7 +85,12 @@ class InstagramBot(threading.Thread):
                     text = msg.text.strip() if msg.text else ""
                     user_id = str(msg.user_id)
                     
-                    # 1. NEW MEMBER JOIN HANDLER
+                    # --- STRIP BOT USERNAME FROM TEXT ---
+                    # Agar koi @botname /menu bhejta hai, toh usko /menu bana do
+                    if f"@{self.cl.username}" in text:
+                        text = text.replace(f"@{self.cl.username}", "").strip()
+                    
+                    # 1. NEW MEMBER JOIN
                     if msg.item_type == "action_log" and msg.action_log and msg.action_log.action_type == "add_user":
                         for added_user in msg.action_log.users:
                             welcome = f"welcome to our gc @{added_user.username}"
@@ -106,7 +99,6 @@ class InstagramBot(threading.Thread):
 
                     # 2. ADMIN COMMANDS
                     if username in self.admins:
-                        # STOP COMMAND (Stops spam and bad word)
                         if text == "/stop":
                             self.bad_target = None
                             self.bad_word = None
@@ -114,7 +106,6 @@ class InstagramBot(threading.Thread):
                             self.safe_send("Stopped all actions.", self.group_id, reply_to_id=msg.id)
                             continue
 
-                        # SPAM COMMAND
                         if text.startswith("/spam "):
                             spam_text = text[6:]
                             self.stop_spam = False
@@ -168,25 +159,22 @@ class InstagramBot(threading.Thread):
                             self.safe_send(stats_text, self.group_id, reply_to_id=msg.id)
                             continue
 
-                    # 3. BAD WORD SYSTEM (Replies to the person)
+                    # 3. BAD WORD SYSTEM
                     if self.bad_target and self.bad_target in text:
-                        # Check if the target user is the one who typed, or just reply to the message
                         self.safe_send(f"@{self.bad_target} {self.bad_word}", self.group_id, reply_to_id=msg.id)
                         continue
 
-                    # 4. IGNORE WORD SYSTEM (New Feature)
+                    # 4. IGNORE WORD SYSTEM
                     if re.search(r'i\s*g\s*n\s*o\s*r\s*e', text, re.IGNORECASE):
-                        reply_text = "Are babu ignore ho gye koi nah mein hu na 💖"
-                        self.safe_send(reply_text, self.group_id, reply_to_id=msg.id)
+                        self.safe_send("Are babu ignore ho gye koi nah mein hu na 💖", self.group_id, reply_to_id=msg.id)
                         continue
 
-                    # 5. PROMOTION LINK DETECTOR (New Feature)
+                    # 5. PROMOTION LINK DETECTOR
                     if re.search(r'https:\/\/ig\.me\/', text):
-                        reply_text = "PROMOTION KARNE WALE KE 12 B44P"
-                        self.safe_send(reply_text, self.group_id, reply_to_id=msg.id)
+                        self.safe_send("PROMOTION KARNE WALE KE 12 B44P", self.group_id, reply_to_id=msg.id)
                         continue
 
-                    # 6. 12-HOUR WELCOME BACK SYSTEM
+                    # 6. 12-HOUR WELCOME BACK
                     last_welcome = get_user_last_welcome(user_id)
                     now = datetime.now()
                     
@@ -195,8 +183,7 @@ class InstagramBot(threading.Thread):
                         self.safe_send(welcome_msg, self.group_id, reply_to_id=msg.id)
                         update_user_welcome(user_id, username)
 
-                # Sleep before checking again
-                time.sleep(1)
+                time.sleep(1.5) # Thoda delay taaki Instagram block na kare
 
             except RateLimitError:
                 print("[!] Rate limited by Instagram. Sleeping for 30s...")
@@ -211,30 +198,20 @@ class InstagramBot(threading.Thread):
 
         print("[!] Bot Engine Stopped.")
 
-# Global Instance
 bot_instance = None
 
-# ==========================================
-# WEB ROUTES
-# ==========================================
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     is_running = get_config("is_running", False)
-    return templates.TemplateResponse(
-        request=request, 
-        name="index.html", 
-        context={"running": is_running}
-    )
+    return templates.TemplateResponse(request=request, name="index.html", context={"running": is_running})
 
 @app.post("/start")
 async def start_bot(request: Request, session_id: str = Form(...), group_id: str = Form(...), admins: str = Form(...)):
     global bot_instance
-    
     if get_config("is_running", False):
         return RedirectResponse(url="/", status_code=303)
 
     admin_list = [a.strip().replace("@", "") for a in admins.split(",") if a.strip()][:5]
-    
     set_config("session_id", session_id.strip())
     set_config("group_id", group_id.strip())
     set_config("admins", admin_list)
@@ -242,7 +219,6 @@ async def start_bot(request: Request, session_id: str = Form(...), group_id: str
     
     bot_instance = InstagramBot()
     bot_instance.start()
-    
     return RedirectResponse(url="/", status_code=303)
 
 @app.post("/stop")
