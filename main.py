@@ -199,10 +199,11 @@ bot_instance = None
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     is_running = get_config("is_running", False)
-    return templates.TemplateResponse("index.html", {
-        "request": request, 
-        "running": is_running
-    })
+    return templates.TemplateResponse(
+        request=request, 
+        name="index.html", 
+        context={"running": is_running}
+    )
 
 @app.post("/start")
 async def start_bot(request: Request, session_id: str = Form(...), group_id: str = Form(...), admins: str = Form(...)):
