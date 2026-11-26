@@ -16,7 +16,6 @@ from database import get_config, set_config, update_user_welcome, get_user_last_
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
-# Session file to save cookies and device ID
 SESSION_FILE = "ig_session.json"
 
 class InstagramBot(threading.Thread):
@@ -41,15 +40,24 @@ class InstagramBot(threading.Thread):
         try:
             print(f"[*] Sending reply: '{text}'")
             if reply_to_id:
-                self.cl.direct_send(text, thread_ids=[thread_id], replied_to_message_id=reply_to_id)
+                try:
+                    # Using reply_to_message for newer instagrapi versions
+                    self.cl.direct_send(text, thread_ids=[thread_id], reply_to_message=reply_to_id)
+                except TypeError:
+                    # Fallback if it's an older version
+                    self.cl.direct_send(text, thread_ids=[thread_id], replied_to_message_id=reply_to_id)
             else:
                 self.cl.direct_send(text, thread_ids=[thread_id])
             time.sleep(1.0)
         except Exception as e:
             print(f"[-] Message Send Failed: {e}")
+            # Last resort fallback without reply
+            try:
+                self.cl.direct_send(text, thread_ids=[thread_id])
+            except:
+                pass
 
     def keep_alive(self):
-        """Har 5 minute mein Instagram ko ping karega taaki session expire na ho"""
         while self.running:
             try:
                 time.sleep(300) # 5 minutes
@@ -68,7 +76,6 @@ class InstagramBot(threading.Thread):
         print("[*] Initializing Instagram Client...")
         self.cl = Client()
         
-        # Load session if exists
         if os.path.exists(SESSION_FILE):
             try:
                 self.cl.load_settings(SESSION_FILE)
@@ -80,11 +87,8 @@ class InstagramBot(threading.Thread):
             print("[*] Trying to login via session ID...")
             self.cl.login_by_sessionid(self.session_id)
             print(f"[+] Login Successful! Bot Username: @{self.cl.username}")
-            
-            # Save session settings to avoid future expiration
             self.cl.dump_settings(SESSION_FILE)
             print("[*] Session saved successfully.")
-            
             set_config("is_running", True)
         except Exception as e:
             print(f"[-] Login Failed: {e}")
@@ -92,7 +96,6 @@ class InstagramBot(threading.Thread):
             self.running = False
             return
 
-        # Start keep-alive thread
         threading.Thread(target=self.keep_alive, daemon=True).start()
         print("[*] Bot Engine Started. Monitoring Group...")
 
@@ -125,9 +128,11 @@ class InstagramBot(threading.Thread):
                     if f"@{self.cl.username}" in text:
                         text = text.replace(f"@{self.cl.username}", "").strip()
 
-                    # 1. NEW MEMBER JOIN
-                    if msg.item_type == "action_log" and msg.action_log and msg.action_log.action_type == "add_user":
-                        for added_user in msg.action_log.users:
+                    # 1. NEW MEMBER JOIN (Safely handling action_log)
+                    action_log = getattr(msg, 'action_log', None)
+                    if msg.item_type == "action_log" and action_log and getattr(action_log, 'action_type', '') == "add_user":
+                        users = getattr(action_log, 'users', [])
+                        for added_user in users:
                             self.safe_send(f"welcome to our gc @{added_user.username}", self.group_id)
                         continue 
 
