@@ -33,16 +33,20 @@ class InstagramBot(threading.Thread):
         # Bad word system state
         self.bad_target = None
         self.bad_word = None
+        self.stop_spam = False
 
     def stop(self):
         self.running = False
         print("[!] Bot Stop Requested...")
 
-    def safe_send(self, text, thread_id):
-        """Safer message sending with auto-retry"""
+    def safe_send(self, text, thread_id, reply_to_id=None):
+        """Send message, optionally as a swipe reply, with fast response"""
         try:
-            self.cl.direct_send(text, thread_ids=[thread_id])
-            time.sleep(2.0) # Hard sleep to avoid spamming IG servers
+            if reply_to_id:
+                self.cl.direct_send(text, thread_ids=[thread_id], replied_to_message_id=reply_to_id)
+            else:
+                self.cl.direct_send(text, thread_ids=[thread_id])
+            time.sleep(0.5) # Fast response
         except Exception as e:
             print(f"[-] Message Send Failed: {e}")
 
@@ -68,29 +72,23 @@ class InstagramBot(threading.Thread):
             self.running = False
             return
 
-        last_check_time = datetime.now()
         print("[*] Bot Engine Started. Monitoring Group...")
 
         while self.running:
             try:
-                # Check if user requested stop via Web UI
                 if not get_config("is_running", False):
                     self.running = False
                     break
 
-                # Fetch messages
+                # Fetch latest messages
                 messages = self.cl.direct_messages(self.group_id, amount=15)
                 
+                # Process oldest to newest to maintain conversation flow
                 for msg in reversed(messages):
-                    # Skip messages sent before bot started (to prevent double replies)
-                    msg_time = msg.timestamp
-                    if msg_time < last_check_time - timedelta(minutes=1):
-                        continue
-                        
                     if msg.user_id == self.cl.user_id:
-                        continue # Skip own messages
+                        continue 
 
-                    # Fetch username safely (Fixing 'DirectMessage' object has no attribute 'user')
+                    # Fetch username safely
                     try:
                         username = self.cl.user_info(msg.user_id).username
                     except Exception:
@@ -108,17 +106,28 @@ class InstagramBot(threading.Thread):
 
                     # 2. ADMIN COMMANDS
                     if username in self.admins:
+                        # STOP COMMAND (Stops spam and bad word)
+                        if text == "/stop":
+                            self.bad_target = None
+                            self.bad_word = None
+                            self.stop_spam = True
+                            self.safe_send("Stopped all actions.", self.group_id, reply_to_id=msg.id)
+                            continue
+
+                        # SPAM COMMAND
                         if text.startswith("/spam "):
                             spam_text = text[6:]
+                            self.stop_spam = False
                             self.safe_send(f"Spamming 15 times...", self.group_id)
                             for _ in range(15):
-                                if not self.running: break
+                                if not self.running or self.stop_spam: 
+                                    break
                                 self.safe_send(spam_text, self.group_id)
                             continue
                             
                         elif text.startswith("/song "):
                             song_name = text[6:]
-                            self.safe_send(f"🎵 Searching for '{song_name}' on Spotify...", self.group_id)
+                            self.safe_send(f"🎵 Searching for '{song_name}' on Spotify...", self.group_id, reply_to_id=msg.id)
                             time.sleep(1)
                             link = f"https://open.spotify.com/search/{song_name.replace(' ', '%20')}"
                             self.safe_send(f"Result: {link}", self.group_id)
@@ -131,13 +140,7 @@ class InstagramBot(threading.Thread):
                                 word = " ".join(parts[2:])
                                 self.bad_target = target
                                 self.bad_word = word
-                                self.safe_send(f"Target set: @{target} -> '{word}'", self.group_id)
-                            continue
-
-                        elif text == "/stop":
-                            self.bad_target = None
-                            self.bad_word = None
-                            self.safe_send("Stopped bad word spam.", self.group_id)
+                                self.safe_send(f"Target set: @{target} -> '{word}'", self.group_id, reply_to_id=msg.id)
                             continue
 
                         elif text == "/menu":
@@ -147,7 +150,7 @@ class InstagramBot(threading.Thread):
                                 "/bad @user [word]\n/stop\n"
                                 "/total\n/menu"
                             )
-                            self.safe_send(menu_text, self.group_id)
+                            self.safe_send(menu_text, self.group_id, reply_to_id=msg.id)
                             continue
 
                         elif text == "/total":
@@ -162,29 +165,42 @@ class InstagramBot(threading.Thread):
                                 stats_text = f"📊 TODAY'S STATS 📊\nTotal Msgs: {row[0]}\nActive Users: {len(json.loads(row[1]))}\nJoined: {len(json.loads(row[2]))}"
                             else:
                                 stats_text = "📊 No stats recorded for today yet."
-                            self.safe_send(stats_text, self.group_id)
+                            self.safe_send(stats_text, self.group_id, reply_to_id=msg.id)
                             continue
 
-                    # 3. BAD WORD SYSTEM
+                    # 3. BAD WORD SYSTEM (Replies to the person)
                     if self.bad_target and self.bad_target in text:
-                        self.safe_send(f"@{self.bad_target} {self.bad_word}", self.group_id)
+                        # Check if the target user is the one who typed, or just reply to the message
+                        self.safe_send(f"@{self.bad_target} {self.bad_word}", self.group_id, reply_to_id=msg.id)
                         continue
 
-                    # 4. 12-HOUR WELCOME BACK SYSTEM
+                    # 4. IGNORE WORD SYSTEM (New Feature)
+                    if re.search(r'i\s*g\s*n\s*o\s*r\s*e', text, re.IGNORECASE):
+                        reply_text = "Are babu ignore ho gye koi nah mein hu na 💖"
+                        self.safe_send(reply_text, self.group_id, reply_to_id=msg.id)
+                        continue
+
+                    # 5. PROMOTION LINK DETECTOR (New Feature)
+                    if re.search(r'https:\/\/ig\.me\/', text):
+                        reply_text = "PROMOTION KARNE WALE KE 12 B44P"
+                        self.safe_send(reply_text, self.group_id, reply_to_id=msg.id)
+                        continue
+
+                    # 6. 12-HOUR WELCOME BACK SYSTEM
                     last_welcome = get_user_last_welcome(user_id)
                     now = datetime.now()
                     
                     if not last_welcome or (now - last_welcome).total_seconds() > 12 * 3600:
                         welcome_msg = f"Welcome back to our gc @{username} how are you? 🎈"
-                        self.safe_send(welcome_msg, self.group_id)
+                        self.safe_send(welcome_msg, self.group_id, reply_to_id=msg.id)
                         update_user_welcome(user_id, username)
 
                 # Sleep before checking again
-                time.sleep(4)
+                time.sleep(1)
 
             except RateLimitError:
-                print("[!] Rate limited by Instagram. Sleeping for 60s...")
-                time.sleep(60)
+                print("[!] Rate limited by Instagram. Sleeping for 30s...")
+                time.sleep(30)
             except ChallengeRequired:
                 print("[!] Account challenged! Session invalid. Stopping bot.")
                 self.running = False
@@ -217,16 +233,13 @@ async def start_bot(request: Request, session_id: str = Form(...), group_id: str
     if get_config("is_running", False):
         return RedirectResponse(url="/", status_code=303)
 
-    # Parse admins (max 3)
-    admin_list = [a.strip().replace("@", "") for a in admins.split(",") if a.strip()][:3]
+    admin_list = [a.strip().replace("@", "") for a in admins.split(",") if a.strip()][:5]
     
-    # Save to DB
     set_config("session_id", session_id.strip())
     set_config("group_id", group_id.strip())
     set_config("admins", admin_list)
     set_config("is_running", True)
     
-    # Start Thread
     bot_instance = InstagramBot()
     bot_instance.start()
     
