@@ -25,10 +25,10 @@ class InstagramBot(threading.Thread):
         self.group_id = ""
         self.admins = []
         self.session_id = ""
-        
         self.bad_target = None
         self.bad_word = None
         self.stop_spam = False
+        self.processed_msgs = set()
 
     def stop(self):
         self.running = False
@@ -36,11 +36,12 @@ class InstagramBot(threading.Thread):
 
     def safe_send(self, text, thread_id, reply_to_id=None):
         try:
+            print(f"[*] Sending reply: '{text}' to thread {thread_id}")
             if reply_to_id:
                 self.cl.direct_send(text, thread_ids=[thread_id], replied_to_message_id=reply_to_id)
             else:
                 self.cl.direct_send(text, thread_ids=[thread_id])
-            time.sleep(0.5)
+            time.sleep(1.0)
         except Exception as e:
             print(f"[-] Message Send Failed: {e}")
 
@@ -54,11 +55,13 @@ class InstagramBot(threading.Thread):
         self.cl = Client()
         
         try:
+            print("[*] Trying to login via session ID...")
             self.cl.login_by_sessionid(self.session_id)
-            print(f"[+] Login Successful! Bot Username: {self.cl.username}")
+            print(f"[+] Login Successful! Bot Username: @{self.cl.username}")
             set_config("is_running", True)
         except Exception as e:
-            print(f"[-] Login Failed (Invalid Session): {e}")
+            print(f"[-] Login Failed: {e}")
+            traceback.print_exc()
             set_config("is_running", False)
             self.running = False
             return
@@ -68,28 +71,39 @@ class InstagramBot(threading.Thread):
         while self.running:
             try:
                 if not get_config("is_running", False):
+                    print("[*] Stop requested from DB.")
                     self.running = False
                     break
 
-                messages = self.cl.direct_messages(self.group_id, amount=15)
+                messages = self.cl.direct_messages(self.group_id, amount=10)
                 
                 for msg in reversed(messages):
+                    if msg.id in self.processed_msgs:
+                        continue
+                        
+                    self.processed_msgs.add(msg.id)
+                    if len(self.processed_msgs) > 100:
+                        self.processed_msgs.pop()
+
                     if msg.user_id == self.cl.user_id:
                         continue 
 
                     try:
                         username = self.cl.user_info(msg.user_id).username
-                    except Exception:
+                    except Exception as e:
+                        print(f"[-] User info error: {e}")
                         username = "Unknown"
                         
                     text = msg.text.strip() if msg.text else ""
                     user_id = str(msg.user_id)
                     
-                    # --- STRIP BOT USERNAME FROM TEXT ---
-                    # Agar koi @botname /menu bhejta hai, toh usko /menu bana do
+                    print(f"[>] New Message from @{username}: '{text}'")
+                    
+                    # Clean Bot username from text
                     if f"@{self.cl.username}" in text:
                         text = text.replace(f"@{self.cl.username}", "").strip()
-                    
+                        print(f"[*] Cleaned Text: '{text}'")
+
                     # 1. NEW MEMBER JOIN
                     if msg.item_type == "action_log" and msg.action_log and msg.action_log.action_type == "add_user":
                         for added_user in msg.action_log.users:
@@ -183,7 +197,7 @@ class InstagramBot(threading.Thread):
                         self.safe_send(welcome_msg, self.group_id, reply_to_id=msg.id)
                         update_user_welcome(user_id, username)
 
-                time.sleep(1.5) # Thoda delay taaki Instagram block na kare
+                time.sleep(2) # Safe polling rate
 
             except RateLimitError:
                 print("[!] Rate limited by Instagram. Sleeping for 30s...")
@@ -194,6 +208,7 @@ class InstagramBot(threading.Thread):
                 set_config("is_running", False)
             except Exception as e:
                 print(f"[!] Loop Error: {e}")
+                traceback.print_exc()
                 time.sleep(5)
 
         print("[!] Bot Engine Stopped.")
