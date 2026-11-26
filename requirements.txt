@@ -1,8 +1,8 @@
-fastapi==0.103.1
-uvicorn==0.23.2
+fastapi
+uvicorn
 instagrapi
-jinja2==3.1.2
-python-multipart==0.0.6
-pillow==10.0.0
-pydantic==2.3.0
-requests==2.31.0
+jinja2
+python-multipart
+pillow
+pydantic
+requests
