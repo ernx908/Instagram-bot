@@ -90,8 +90,13 @@ class InstagramBot(threading.Thread):
                     if msg.user_id == self.cl.user_id:
                         continue # Skip own messages
 
+                    # Fetch username safely (Fixing 'DirectMessage' object has no attribute 'user')
+                    try:
+                        username = self.cl.user_info(msg.user_id).username
+                    except Exception:
+                        username = "Unknown"
+                        
                     text = msg.text.strip() if msg.text else ""
-                    username = msg.user.username
                     user_id = str(msg.user_id)
                     
                     # 1. NEW MEMBER JOIN HANDLER
