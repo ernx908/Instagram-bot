@@ -16,6 +16,9 @@ from database import get_config, set_config, update_user_welcome, get_user_last_
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
+# Session file to save cookies and device ID
+SESSION_FILE = "ig_session.json"
+
 class InstagramBot(threading.Thread):
     def __init__(self):
         super().__init__()
@@ -36,7 +39,7 @@ class InstagramBot(threading.Thread):
 
     def safe_send(self, text, thread_id, reply_to_id=None):
         try:
-            print(f"[*] Sending reply: '{text}' to thread {thread_id}")
+            print(f"[*] Sending reply: '{text}'")
             if reply_to_id:
                 self.cl.direct_send(text, thread_ids=[thread_id], replied_to_message_id=reply_to_id)
             else:
@@ -44,6 +47,17 @@ class InstagramBot(threading.Thread):
             time.sleep(1.0)
         except Exception as e:
             print(f"[-] Message Send Failed: {e}")
+
+    def keep_alive(self):
+        """Har 5 minute mein Instagram ko ping karega taaki session expire na ho"""
+        while self.running:
+            try:
+                time.sleep(300) # 5 minutes
+                if self.running and self.cl:
+                    self.cl.get_timeline_feed()
+                    print("[*] Keep-Alive Ping Sent")
+            except Exception as e:
+                print(f"[-] Keep-Alive Failed: {e}")
 
     def run(self):
         self.running = True
@@ -54,24 +68,37 @@ class InstagramBot(threading.Thread):
         print("[*] Initializing Instagram Client...")
         self.cl = Client()
         
+        # Load session if exists
+        if os.path.exists(SESSION_FILE):
+            try:
+                self.cl.load_settings(SESSION_FILE)
+                print("[*] Loaded saved device fingerprint.")
+            except Exception as e:
+                print(f"[-] Could not load settings: {e}")
+
         try:
             print("[*] Trying to login via session ID...")
             self.cl.login_by_sessionid(self.session_id)
             print(f"[+] Login Successful! Bot Username: @{self.cl.username}")
+            
+            # Save session settings to avoid future expiration
+            self.cl.dump_settings(SESSION_FILE)
+            print("[*] Session saved successfully.")
+            
             set_config("is_running", True)
         except Exception as e:
             print(f"[-] Login Failed: {e}")
-            traceback.print_exc()
             set_config("is_running", False)
             self.running = False
             return
 
+        # Start keep-alive thread
+        threading.Thread(target=self.keep_alive, daemon=True).start()
         print("[*] Bot Engine Started. Monitoring Group...")
 
         while self.running:
             try:
                 if not get_config("is_running", False):
-                    print("[*] Stop requested from DB.")
                     self.running = False
                     break
 
@@ -80,7 +107,6 @@ class InstagramBot(threading.Thread):
                 for msg in reversed(messages):
                     if msg.id in self.processed_msgs:
                         continue
-                        
                     self.processed_msgs.add(msg.id)
                     if len(self.processed_msgs) > 100:
                         self.processed_msgs.pop()
@@ -90,25 +116,19 @@ class InstagramBot(threading.Thread):
 
                     try:
                         username = self.cl.user_info(msg.user_id).username
-                    except Exception as e:
-                        print(f"[-] User info error: {e}")
+                    except Exception:
                         username = "Unknown"
                         
                     text = msg.text.strip() if msg.text else ""
                     user_id = str(msg.user_id)
                     
-                    print(f"[>] New Message from @{username}: '{text}'")
-                    
-                    # Clean Bot username from text
                     if f"@{self.cl.username}" in text:
                         text = text.replace(f"@{self.cl.username}", "").strip()
-                        print(f"[*] Cleaned Text: '{text}'")
 
                     # 1. NEW MEMBER JOIN
                     if msg.item_type == "action_log" and msg.action_log and msg.action_log.action_type == "add_user":
                         for added_user in msg.action_log.users:
-                            welcome = f"welcome to our gc @{added_user.username}"
-                            self.safe_send(welcome, self.group_id)
+                            self.safe_send(f"welcome to our gc @{added_user.username}", self.group_id)
                         continue 
 
                     # 2. ADMIN COMMANDS
@@ -125,17 +145,15 @@ class InstagramBot(threading.Thread):
                             self.stop_spam = False
                             self.safe_send(f"Spamming 15 times...", self.group_id)
                             for _ in range(15):
-                                if not self.running or self.stop_spam: 
-                                    break
+                                if not self.running or self.stop_spam: break
                                 self.safe_send(spam_text, self.group_id)
                             continue
                             
                         elif text.startswith("/song "):
                             song_name = text[6:]
-                            self.safe_send(f"🎵 Searching for '{song_name}' on Spotify...", self.group_id, reply_to_id=msg.id)
+                            self.safe_send(f"🎵 Searching for '{song_name}'...", self.group_id, reply_to_id=msg.id)
                             time.sleep(1)
-                            link = f"https://open.spotify.com/search/{song_name.replace(' ', '%20')}"
-                            self.safe_send(f"Result: {link}", self.group_id)
+                            self.safe_send(f"https://open.spotify.com/search/{song_name.replace(' ', '%20')}", self.group_id)
                             continue
 
                         elif text.startswith("/bad @"):
@@ -149,12 +167,7 @@ class InstagramBot(threading.Thread):
                             continue
 
                         elif text == "/menu":
-                            menu_text = (
-                                "🤖 BOT MENU 🤖\n"
-                                "/spam [msg]\n/song [name]\n"
-                                "/bad @user [word]\n/stop\n"
-                                "/total\n/menu"
-                            )
+                            menu_text = "🤖 BOT MENU 🤖\n/spam [msg]\n/song [name]\n/bad @user [word]\n/stop\n/total\n/menu"
                             self.safe_send(menu_text, self.group_id, reply_to_id=msg.id)
                             continue
 
@@ -165,42 +178,37 @@ class InstagramBot(threading.Thread):
                             c.execute("SELECT total_msgs, active_users, joined_users FROM stats WHERE date=?", (today,))
                             row = c.fetchone()
                             conn.close()
-                            
-                            if row:
-                                stats_text = f"📊 TODAY'S STATS 📊\nTotal Msgs: {row[0]}\nActive Users: {len(json.loads(row[1]))}\nJoined: {len(json.loads(row[2]))}"
-                            else:
-                                stats_text = "📊 No stats recorded for today yet."
+                            stats_text = f"📊 TODAY'S STATS 📊\nTotal Msgs: {row[0] if row else 0}\nActive Users: {len(json.loads(row[1])) if row else 0}\nJoined: {len(json.loads(row[2])) if row else 0}"
                             self.safe_send(stats_text, self.group_id, reply_to_id=msg.id)
                             continue
 
-                    # 3. BAD WORD SYSTEM
+                    # 3. BAD WORD
                     if self.bad_target and self.bad_target in text:
                         self.safe_send(f"@{self.bad_target} {self.bad_word}", self.group_id, reply_to_id=msg.id)
                         continue
 
-                    # 4. IGNORE WORD SYSTEM
+                    # 4. IGNORE WORD
                     if re.search(r'i\s*g\s*n\s*o\s*r\s*e', text, re.IGNORECASE):
                         self.safe_send("Are babu ignore ho gye koi nah mein hu na 💖", self.group_id, reply_to_id=msg.id)
                         continue
 
-                    # 5. PROMOTION LINK DETECTOR
+                    # 5. PROMOTION LINK
                     if re.search(r'https:\/\/ig\.me\/', text):
                         self.safe_send("PROMOTION KARNE WALE KE 12 B44P", self.group_id, reply_to_id=msg.id)
                         continue
 
-                    # 6. 12-HOUR WELCOME BACK
+                    # 6. 12-HOUR WELCOME
                     last_welcome = get_user_last_welcome(user_id)
                     now = datetime.now()
-                    
                     if not last_welcome or (now - last_welcome).total_seconds() > 12 * 3600:
                         welcome_msg = f"Welcome back to our gc @{username} how are you? 🎈"
                         self.safe_send(welcome_msg, self.group_id, reply_to_id=msg.id)
                         update_user_welcome(user_id, username)
 
-                time.sleep(2) # Safe polling rate
+                time.sleep(2)
 
             except RateLimitError:
-                print("[!] Rate limited by Instagram. Sleeping for 30s...")
+                print("[!] Rate limited... Sleep 30s")
                 time.sleep(30)
             except ChallengeRequired:
                 print("[!] Account challenged! Session invalid. Stopping bot.")
@@ -208,7 +216,6 @@ class InstagramBot(threading.Thread):
                 set_config("is_running", False)
             except Exception as e:
                 print(f"[!] Loop Error: {e}")
-                traceback.print_exc()
                 time.sleep(5)
 
         print("[!] Bot Engine Stopped.")
